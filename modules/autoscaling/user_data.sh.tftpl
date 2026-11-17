@@ -1,0 +1,145 @@
+#!/bin/bash
+set -Eeuo pipefail
+exec > >(tee -a /var/log/comando-bootstrap.log | logger -t comando-bootstrap -s 2>/dev/console) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+
+APP_DIR=/opt/comando
+EFS_MOUNT=/mnt/comando-anexos
+AWS_REGION='${aws_region}'
+DB_ENDPOINT='${database_endpoint}'
+DB_NAME='${database_name}'
+DB_SECRET_ARN='${database_secret_arn}'
+APP_KEY_SECRET_ARN='${app_key_secret_arn}'
+ADMIN_SECRET_ARN='${initial_admin_secret_arn}'
+REPOSITORY='${application_repository_url}'
+COMMIT='${application_commit_sha}'
+EFS_ID='${efs_file_system_id}'
+EFS_ACCESS_POINT='${efs_access_point_id}'
+
+apt-get update
+apt-get install -y ca-certificates curl git gnupg jq awscli python3
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+ARCH="$(dpkg --print-architecture)"
+CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' "$ARCH" "$CODENAME" > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+
+# Install AWS's maintained EFS mount helper, required for TLS and access points.
+curl -fsSL https://amazon-efs-utils.aws.com/efs-utils-installer.sh | bash -s -- --install
+mkdir -p "$EFS_MOUNT"
+grep -qF "$EFS_ID:/ $EFS_MOUNT efs " /etc/fstab || \
+  printf '%s:/ %s efs _netdev,noresvport,tls,accesspoint=%s 0 0\n' "$EFS_ID" "$EFS_MOUNT" "$EFS_ACCESS_POINT" >> /etc/fstab
+mount "$EFS_MOUNT" || mount -a
+
+mkdir -p "$APP_DIR"
+git -C "$APP_DIR" init
+git -C "$APP_DIR" remote add origin "$REPOSITORY"
+git -C "$APP_DIR" fetch --depth 1 origin "$COMMIT"
+git -C "$APP_DIR" checkout --detach FETCH_HEAD
+mkdir -p "$APP_DIR/docker/certs" "$APP_DIR/backend/deploy"
+curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+  -o "$APP_DIR/docker/certs/global-bundle.pem"
+
+DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region "$AWS_REGION" --secret-id "$DB_SECRET_ARN" --query SecretString --output text)"
+APP_KEY="$(aws secretsmanager get-secret-value --region "$AWS_REGION" --secret-id "$APP_KEY_SECRET_ARN" --query SecretString --output text)"
+ADMIN_SECRET_JSON="$(aws secretsmanager get-secret-value --region "$AWS_REGION" --secret-id "$ADMIN_SECRET_ARN" --query SecretString --output text)"
+DB_USERNAME="$(jq -r .username <<< "$DB_SECRET_JSON")"
+DB_PASSWORD="$(jq -r .password <<< "$DB_SECRET_JSON")"
+INITIAL_ADMIN_NAME="$(jq -r .name <<< "$ADMIN_SECRET_JSON")"
+INITIAL_ADMIN_EMAIL="$(jq -r .email <<< "$ADMIN_SECRET_JSON")"
+INITIAL_ADMIN_PASSWORD="$(jq -r .password <<< "$ADMIN_SECRET_JSON")"
+
+# Quote values for dotenv; secrets are written only to the root-readable .env.
+dotenv_quote() {
+  python3 -c 'import sys; s=sys.argv[1]; s=s.replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34)).replace(chr(36), chr(92)+chr(36)).replace(chr(10), chr(92)+"n"); print(chr(34)+s+chr(34), end="")' "$1"
+}
+APP_URL='${application_url}'
+umask 077
+cat > "$APP_DIR/.env" <<'ENV'
+COMPOSE_PROJECT_NAME=comando
+COMANDO_TAG=aws
+APP_NAME=Comando
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=${application_url}
+APP_LOCALE=pt_BR
+APP_FALLBACK_LOCALE=pt_BR
+DISPLAY_TIMEZONE=America/Sao_Paulo
+WEB_PORT=8080
+WEB_BIND=0.0.0.0
+DB_CONNECTION=pgsql
+DB_HOST=${database_endpoint}
+DB_PORT=5432
+DB_DATABASE=${database_name}
+DB_SSLMODE=verify-full
+DB_SSLROOTCERT=/etc/comando/certs/global-bundle.pem
+SESSION_DRIVER=database
+SESSION_LIFETIME=120
+SESSION_EXPIRE_ON_CLOSE=false
+SESSION_ENCRYPT=true
+SESSION_SECURE_COOKIE=false
+SESSION_SAME_SITE=lax
+SESSION_DOMAIN=
+QUEUE_CONNECTION=database
+CACHE_STORE=database
+FILESYSTEM_DISK=local
+ANEXOS_DISK=local
+LOG_CHANNEL=stderr
+LOG_LEVEL=warning
+BCRYPT_ROUNDS=12
+ENV
+{
+  printf 'APP_KEY=%s\n' "$(dotenv_quote "$APP_KEY")"
+  printf 'DB_USERNAME=%s\n' "$(dotenv_quote "$DB_USERNAME")"
+  printf 'DB_PASSWORD=%s\n' "$(dotenv_quote "$DB_PASSWORD")"
+  printf 'SANCTUM_STATEFUL_DOMAINS=%s\n' "$(dotenv_quote "$${APP_URL#http://}")"
+} >> "$APP_DIR/.env"
+chmod 600 "$APP_DIR/.env"
+
+cat > "$APP_DIR/compose.aws.yaml" <<'YAML'
+volumes:
+  anexos:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/comando-anexos
+YAML
+
+# Keep a PostgreSQL session lock while migrations execute to serialize ASG boots.
+cat > "$APP_DIR/backend/deploy/initialize.php" <<'PHP'
+<?php
+declare(strict_types=1);
+
+$dsn = sprintf(
+    'pgsql:host=%s;port=%s;dbname=%s;sslmode=%s;sslrootcert=%s',
+    getenv('DB_HOST'), getenv('DB_PORT') ?: '5432', getenv('DB_DATABASE'),
+    getenv('DB_SSLMODE') ?: 'verify-full', getenv('DB_SSLROOTCERT')
+);
+$pdo = new PDO($dsn, getenv('DB_USERNAME'), getenv('DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$pdo->query('SELECT pg_advisory_lock(2026111701)');
+try {
+    $name = escapeshellarg((string) getenv('COMANDO_INITIAL_ADMIN_NAME'));
+    $email = escapeshellarg((string) getenv('COMANDO_INITIAL_ADMIN_EMAIL'));
+    passthru("php artisan comando:install --nome=$name --email=$email --senha-env=COMANDO_ADMIN_PASSWORD", $status);
+} finally {
+    $pdo->query('SELECT pg_advisory_unlock(2026111701)');
+}
+exit($status);
+PHP
+chmod 644 "$APP_DIR/backend/deploy/initialize.php"
+
+cd "$APP_DIR"
+docker compose -f compose.yaml -f compose.aws.yaml build
+export COMANDO_ADMIN_PASSWORD="$INITIAL_ADMIN_PASSWORD"
+export COMANDO_INITIAL_ADMIN_NAME="$INITIAL_ADMIN_NAME"
+export COMANDO_INITIAL_ADMIN_EMAIL="$INITIAL_ADMIN_EMAIL"
+docker compose -f compose.yaml -f compose.aws.yaml run --rm --no-deps \
+  -e COMANDO_ADMIN_PASSWORD -e COMANDO_INITIAL_ADMIN_NAME -e COMANDO_INITIAL_ADMIN_EMAIL \
+  backend php deploy/initialize.php
+unset COMANDO_ADMIN_PASSWORD INITIAL_ADMIN_PASSWORD DB_SECRET_JSON APP_KEY ADMIN_SECRET_JSON DB_PASSWORD
+docker compose -f compose.yaml -f compose.aws.yaml up -d

@@ -1,0 +1,24 @@
+# Terraform plugins, local state, plans, and crash reports
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+crash.log
+crash.*.log
+
+# Local variable files may contain environment-specific or sensitive values
+terraform.tfvars
+*.auto.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# Credentials and local secrets
+.aws/
+credentials
+credentials.txt
+*.pem
+*.key
+.env
+.env.*
+!.env.example
