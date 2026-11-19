@@ -105,6 +105,12 @@ variable "application_commit_sha" {
   default     = "0f9e06f9ae3456c3905fbc96d7857ca7d0e3c5f8"
 }
 
+variable "pull_deploy_timer_enabled" {
+  description = "Enable periodic pull deploy dry-runs on newly launched EC2 instances."
+  type        = bool
+  default     = false
+}
+
 variable "initial_admin_name" {
   description = "Display name of the first Comando administrator."
   type        = string
