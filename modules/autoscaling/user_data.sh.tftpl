@@ -11,7 +11,7 @@ DB_NAME='${database_name}'
 DB_SECRET_ARN='${database_secret_arn}'
 APP_KEY_SECRET_ARN='${app_key_secret_arn}'
 ADMIN_SECRET_ARN='${initial_admin_secret_arn}'
-REPOSITORY='${application_repository_url}'
+REPOSITORY='${replace(application_repository_url, "'", "'\\''")}'
 COMMIT='${application_commit_sha}'
 EFS_ID='${efs_file_system_id}'
 EFS_ACCESS_POINT='${efs_access_point_id}'
@@ -143,3 +143,48 @@ docker compose -f compose.yaml -f compose.aws.yaml run --rm --no-deps \
   backend php deploy/initialize.php
 unset COMANDO_ADMIN_PASSWORD INITIAL_ADMIN_PASSWORD DB_SECRET_JSON APP_KEY ADMIN_SECRET_JSON DB_PASSWORD
 docker compose -f compose.yaml -f compose.aws.yaml up -d
+
+install -d -o root -g root -m 0755 /usr/local/lib/comando-pull
+%{ for name, content in pull_deploy_scripts ~}
+cat > /usr/local/lib/comando-pull/${name} <<'COMANDO_PULL_FILE'
+${chomp(content)}
+COMANDO_PULL_FILE
+%{ endfor ~}
+chmod 0644 /usr/local/lib/comando-pull/*
+printf '#!/bin/bash\nexec /bin/bash /usr/local/lib/comando-pull/pull-deploy.sh --repository-url %q "$@"\n' \
+  "$REPOSITORY" > /usr/local/sbin/comando-pull
+chmod 0755 /usr/local/sbin/comando-pull
+
+cat > /etc/systemd/system/comando-pull.service <<'UNIT'
+[Unit]
+Description=Check Comando pull deploy eligibility
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+StateDirectory=comando-pull
+StateDirectoryMode=0700
+Environment=COMANDO_CI_RETRY_FILE=/var/lib/comando-pull/retry-until
+ExecStart=/usr/local/sbin/comando-pull --dry-run
+SuccessExitStatus=10
+UNIT
+
+cat > /etc/systemd/system/comando-pull.timer <<'UNIT'
+[Unit]
+Description=Check Comando pull deploy eligibility periodically
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+chmod 0644 /etc/systemd/system/comando-pull.{service,timer}
+systemctl daemon-reload
+%{ if pull_deploy_timer_enabled ~}
+systemctl enable --now comando-pull.timer
+%{ endif ~}

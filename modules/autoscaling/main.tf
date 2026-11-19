@@ -28,11 +28,8 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_launch_template" "instances" {
-  name_prefix   = "${var.project_name}-ec2-"
-  image_id      = data.aws_ami.ubuntu.id
-  instance_type = var.instance_type
-  user_data = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
+locals {
+  user_data = base64gzip(replace(templatefile("${path.module}/user_data.sh.tftpl", {
     aws_region                 = var.aws_region
     application_repository_url = var.application_repository_url
     application_commit_sha     = var.application_commit_sha
@@ -46,7 +43,30 @@ resource "aws_launch_template" "instances" {
     initial_admin_email        = var.initial_admin_email
     efs_file_system_id         = var.efs_file_system_id
     efs_access_point_id        = var.efs_access_point_id
-  }))
+    pull_deploy_timer_enabled  = var.pull_deploy_timer_enabled
+    pull_deploy_scripts = {
+      for name in ["pull-deploy.sh", "check-deploy-ci.sh", "check-schema.php", "deploy-lock.php"] :
+      name => file("${path.root}/scripts/${name}")
+    }
+  }), "\r\n", "\n"))
+}
+
+resource "aws_launch_template" "instances" {
+  name_prefix   = "${var.project_name}-ec2-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  user_data     = local.user_data
+
+  lifecycle {
+    precondition {
+      condition     = length(local.user_data) * 3 / 4 - length(regex("=*$", local.user_data)) <= 16384
+      error_message = "Compressed EC2 user data must fit within 16 KiB."
+    }
+    precondition {
+      condition     = !var.pull_deploy_timer_enabled || can(regex("^https://github\\.com/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$", var.application_repository_url))
+      error_message = "The pull deploy timer requires an HTTPS GitHub repository URL without embedded credentials."
+    }
+  }
 
   vpc_security_group_ids = [var.instance_security_group_id]
 

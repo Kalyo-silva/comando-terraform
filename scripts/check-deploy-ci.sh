@@ -22,6 +22,14 @@ audit() {
     "$(date -u +%FT%TZ)" "$repository" "$dry_run" "$*" >&2
 }
 
+retry_file=${COMANDO_CI_RETRY_FILE:-}
+if [[ -n $retry_file && -f $retry_file ]]; then
+  if awk -v now="$(date +%s)" '$0 ~ /^[0-9]+$/ && $0 > now { waiting = 1 } END { exit !waiting }' "$retry_file"; then
+    audit 'result=api_backoff'
+    exit 10
+  fi
+fi
+
 python=python3
 if ! "$python" --version >/dev/null 2>&1; then
   python=python
@@ -45,7 +53,7 @@ numeric_header() {
 }
 
 request() {
-  local stage=$1 url=$2 status rc
+  local stage=$1 url=$2 status rc remaining reset retry_after
   if status=$(curl -q --silent --connect-timeout 5 --max-time 20 \
     --header 'Accept: application/vnd.github+json' \
     --header 'X-GitHub-Api-Version: 2022-11-28' \
@@ -53,7 +61,19 @@ request() {
     case "$status" in
       200) return ;;
       403|429)
-        audit "result=api_restricted stage=$stage http=$status remaining=$(numeric_header x-ratelimit-remaining:) reset_epoch=$(numeric_header x-ratelimit-reset:) retry_after_seconds=$(numeric_header retry-after:)"
+        remaining=$(numeric_header x-ratelimit-remaining:)
+        reset=$(numeric_header x-ratelimit-reset:)
+        retry_after=$(numeric_header retry-after:)
+        audit "result=api_restricted stage=$stage http=$status remaining=$remaining reset_epoch=$reset retry_after_seconds=$retry_after"
+        if [[ -n $retry_file ]]; then
+          awk -v now="$(date +%s)" -v delay="$retry_after" -v reset="$reset" '
+            BEGIN {
+              deadline = now + delay
+              if (reset ~ /^[0-9]+$/ && reset > deadline) deadline = reset
+              printf "%.0f\n", deadline
+            }
+          ' > "$retry_file"
+        fi
         ;;
       [1-5][0-9][0-9]) audit "result=http_error stage=$stage http=$status" ;;
       *) audit "result=invalid_http_status stage=$stage" ;;

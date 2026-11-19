@@ -101,3 +101,10 @@ check forbidden 20 'result=api_restricted stage=ci http=403'
 check rate_limit 20 'http=429 remaining=0 reset_epoch=1800000000 retry_after_seconds=900'
 check bad_json 20 'result=head_unavailable'
 check timeout 20 'result=transport_error stage=head curl_exit=28'
+
+export COMANDO_CI_RETRY_FILE="$tmp/retry-until"
+check rate_limit 20 'result=api_restricted stage=ci'
+[[ $(cat "$COMANDO_CI_RETRY_FILE") -ge 1800000000 ]]
+check approved 10 'result=api_backoff'
+printf '1\n' > "$COMANDO_CI_RETRY_FILE"
+check approved 0 "result=eligible sha=$SHA"

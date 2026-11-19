@@ -20,5 +20,6 @@ db_master_username   = "comando"
 
 application_repository_url = "https://github.com/CarlosEduardo-N-O/comando.git"
 application_commit_sha     = "0f9e06f9ae3456c3905fbc96d7857ca7d0e3c5f8"
+pull_deploy_timer_enabled  = false
 initial_admin_name         = "Administrador"
 initial_admin_email        = "admin@comando.local"

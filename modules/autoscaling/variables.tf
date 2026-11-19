@@ -57,6 +57,7 @@ variable "instance_profile_name" { type = string }
 variable "aws_region" { type = string }
 variable "application_repository_url" { type = string }
 variable "application_commit_sha" { type = string }
+variable "pull_deploy_timer_enabled" { type = bool }
 variable "application_url" { type = string }
 variable "database_endpoint" { type = string }
 variable "database_name" { type = string }
