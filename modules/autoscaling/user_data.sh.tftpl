@@ -154,6 +154,7 @@ chmod 0644 /usr/local/lib/comando-pull/*
 printf '#!/bin/bash\nexec /bin/bash /usr/local/lib/comando-pull/pull-deploy.sh --repository-url %q "$@"\n' \
   "$REPOSITORY" > /usr/local/sbin/comando-pull
 chmod 0755 /usr/local/sbin/comando-pull
+install -m 0755 /usr/local/lib/comando-pull/auto-pull.sh /usr/local/sbin/comando-auto-pull
 
 cat > /etc/systemd/system/comando-pull.service <<'UNIT'
 [Unit]
@@ -167,6 +168,10 @@ StateDirectory=comando-pull
 StateDirectoryMode=0700
 Environment=COMANDO_CI_RETRY_FILE=/var/lib/comando-pull/retry-until
 ExecStart=/usr/local/sbin/comando-pull --dry-run
+%{ if auto_deploy_enabled ~}
+ExecStart=
+ExecStart=/usr/local/sbin/comando-auto-pull
+%{ endif ~}
 SuccessExitStatus=10
 UNIT
 
@@ -185,6 +190,6 @@ UNIT
 
 chmod 0644 /etc/systemd/system/comando-pull.{service,timer}
 systemctl daemon-reload
-%{ if pull_deploy_timer_enabled ~}
+%{ if pull_deploy_timer_enabled || auto_deploy_enabled ~}
 systemctl enable --now comando-pull.timer
 %{ endif ~}
