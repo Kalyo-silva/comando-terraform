@@ -76,7 +76,7 @@ if "$pull" --apply "$candidate" >"$log" 2>&1; then
   cat -- "$log"
   IFS=' ' read -r new_phase new_active new_pending new_extra < "$state" ||
     fail 'result=activation_state_unreadable'
-  [[ $new_phase == healthy && $new_active == "$candidate" && -z $new_pending && -z $new_extra ]] ||
+  [[ $new_phase == healthy && ${new_active#bootstrap-} == "$candidate" && -z $new_pending && -z $new_extra ]] ||
     fail 'result=activation_state_invalid'
   rm -f -- "$blocked"
   audit "result=deployed sha=$candidate"
