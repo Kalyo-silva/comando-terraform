@@ -122,3 +122,9 @@ variable "initial_admin_email" {
   type        = string
   default     = "admin@comando.local"
 }
+
+variable "auto_deploy_enabled" {
+  description = "Opt-in CI-gated automatic deployment. Only supported with a single EC2 (ASG min/desired/max = 1)."
+  type        = bool
+  default     = false
+}
