@@ -44,8 +44,9 @@ locals {
     efs_file_system_id         = var.efs_file_system_id
     efs_access_point_id        = var.efs_access_point_id
     pull_deploy_timer_enabled  = var.pull_deploy_timer_enabled
+    auto_deploy_enabled        = var.auto_deploy_enabled
     pull_deploy_scripts = {
-      for name in ["pull-deploy.sh", "check-deploy-ci.sh", "check-schema.php", "deploy-lock.php"] :
+      for name in ["pull-deploy.sh", "check-deploy-ci.sh", "check-schema.php", "deploy-lock.php", "auto-pull.sh"] :
       name => file("${path.root}/scripts/${name}")
     }
   }), "\r\n", "\n"))
@@ -59,11 +60,19 @@ resource "aws_launch_template" "instances" {
 
   lifecycle {
     precondition {
+      condition     = !var.auto_deploy_enabled || (var.min_size == 1 && var.max_size == 1 && var.desired_capacity == 1)
+      error_message = "Auto deploy currently supports a single EC2 only: min_size, max_size and desired_capacity must all be 1."
+    }
+    precondition {
+      condition     = !var.auto_deploy_enabled || var.pull_deploy_timer_enabled
+      error_message = "Automatic deployment requires the periodic CI poll timer enabled."
+    }
+    precondition {
       condition     = length(local.user_data) * 3 / 4 - length(regex("=*$", local.user_data)) <= 16384
       error_message = "Compressed EC2 user data must fit within 16 KiB."
     }
     precondition {
-      condition     = !var.pull_deploy_timer_enabled || can(regex("^https://github\\.com/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$", var.application_repository_url))
+      condition     = !(var.pull_deploy_timer_enabled || var.auto_deploy_enabled) || can(regex("^https://github\\.com/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$", var.application_repository_url))
       error_message = "The pull deploy timer requires an HTTPS GitHub repository URL without embedded credentials."
     }
   }
