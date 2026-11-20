@@ -299,3 +299,70 @@ a Fase 3 em toda a frota existente, programe um instance refresh e acompanhe
 a saúde dos alvos no ALB. Uma EC2 substituída inicia em
 `application_commit_sha`. Se a intenção for que novas EC2 iniciem na versão
 promovida manualmente, atualize esse SHA no Terraform.
+
+## Fase 4 — Consulta periódica e CD automático controlado (opt-in)
+
+A consulta de CI pode executar a cada 15 minutos (com atraso aleatório de até 2 minutos) no `comando-pull.timer`.
+O modo padrão continua **sem alteração de contêineres**:
+
+```hcl
+pull_deploy_timer_enabled = true
+auto_deploy_enabled       = false
+```
+
+Para um **piloto estritamente com uma EC2**, o Terraform também oferece:
+
+```hcl
+asg_min_size              = 1
+asg_desired_capacity      = 1
+asg_max_size              = 1
+pull_deploy_timer_enabled = true
+auto_deploy_enabled       = true
+```
+
+**Não habilite a segunda configuração antes de revisar o plano e testar o piloto com um commit aprovado diferente do instalado.** O lançamento com `auto_deploy_enabled=true` é bloqueado pelo Terraform quando a capacidade mínima, desejada ou máxima do ASG não é 1. A modalidade com múltiplas instâncias requer orquestração explícita de rollout, drenagem de conexões, tratamento de jobs e versionamento consistente. Não está implementada.
+
+Quando ativado em nova EC2, o timer executa `comando-auto-pull`. Esse controlador:
+
+- chama `comando-pull --dry-run` e só considera o HEAD de `main` aprovado pelo CI;
+- consulta o estado em `/opt/comando/pull-releases/state` e não recria contêineres para o mesmo SHA;
+- valida `/health` ao detectar uma versão já ativa; recusa avançar se ela estiver doente;
+- para SHA diferente, chama `comando-pull --apply SHA`, aproveitando lock local, lock PostgreSQL, verificação do esquema, saúde dos contêineres e rollback;
+- em caso de falha não transitória, grava o SHA em `/var/lib/comando-pull/auto-blocked-sha` e impede novas tentativas automáticas dessa versão;
+- em estado `switching`, prioriza a recuperação antes de procurar outra versão;
+- respeita bloqueio e backoff das consultas de CI já implementados.
+
+A quarentena é **local à instância**. Falhas antes da ativação podem requerer diagnóstico e liberação manual, e falhas de rollback exigem recuperação supervisionada. O componente não substitui backups, aprovação de alterações de schema nem observabilidade centralizada.
+
+### Testes, acompanhamento e desligamento
+
+Antes de aplicar o Terraform:
+
+```bash
+bash tests/check-deploy-ci.sh
+bash tests/pull-deploy.sh
+bash tests/auto-pull.sh
+```
+
+Em nova EC2 (ou após instalar a nova configuração), verifique:
+
+```bash
+systemctl is-enabled comando-pull.timer
+systemctl is-active comando-pull.timer
+systemctl list-timers comando-pull.timer
+journalctl -u comando-pull.service -n 100 --no-pager
+cat /opt/comando/pull-releases/state 2>/dev/null || true
+cat /var/lib/comando-pull/auto-blocked-sha 2>/dev/null || true
+```
+
+**Parada de emergência na instância:**
+
+```bash
+sudo systemctl disable --now comando-pull.timer
+```
+
+Para persistir o desligamento em novas EC2, configure `auto_deploy_enabled=false` em `terraform.tfvars` e aplique o novo Launch Template. Alterar flags no Terraform **não reconfigura instâncias existentes**; elas precisam ser atualizadas sob procedimento supervisionado.
+
+**Limitação importante do bootstrap:** novas EC2 iniciam em `application_commit_sha`, mesmo se uma EC2 anterior tiver promovido um SHA mais novo. Sincronize o SHA do Terraform com a última versão aprovada após cada promoção, ou uma futura substituição pelo ASG poderá inicializar código anterior. O modo automático de uma instância é um piloto e não resolve sozinho essa convergência de frota.
+
+O comando `terraform apply` pode atualizar o Launch Template e outras propriedades: sempre inspecione o plano, especialmente os efeitos sobre Auto Scaling, antes de aplicar. Não faça troca de instância sem backup e janela de manutenção.

@@ -116,6 +116,7 @@ module "autoscaling" {
   application_repository_url     = var.application_repository_url
   application_commit_sha         = var.application_commit_sha
   pull_deploy_timer_enabled      = var.pull_deploy_timer_enabled
+  auto_deploy_enabled            = var.auto_deploy_enabled
   application_url                = "http://${module.load_balancer.dns_name}"
   database_endpoint              = module.rds.endpoint
   database_name                  = module.rds.database_name

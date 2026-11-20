@@ -68,3 +68,5 @@ variable "initial_admin_name" { type = string }
 variable "initial_admin_email" { type = string }
 variable "efs_file_system_id" { type = string }
 variable "efs_access_point_id" { type = string }
+
+variable "auto_deploy_enabled" { type = bool }
