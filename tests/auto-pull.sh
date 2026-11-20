@@ -28,6 +28,7 @@ case "$SCENARIO" in
   error) echo 'result=rolled_back' >&2; exit 1 ;;
   locked) echo 'result=locked' >&2; exit 1 ;;
   recovery) printf 'healthy %s\n' "$OLD" > "$COMANDO_APP_DIR/pull-releases/state" ;;
+  bootstrap) printf 'healthy bootstrap-%s\n' "$2" > "$COMANDO_APP_DIR/pull-releases/state" ;;
   *) printf 'healthy %s\n' "$2" > "$COMANDO_APP_DIR/pull-releases/state" ;;
 esac
 MOCK
@@ -56,6 +57,9 @@ run() {
   fi
   echo "PASS $SCENARIO $marker"
 }
+reset bootstrap
+run 0 'result=deployed sha='
+grep -Fxq "healthy bootstrap-$CANDIDATE" "$COMANDO_APP_DIR/pull-releases/state"
 reset success
 run 0 'result=deployed sha='
 grep -Fxq "healthy $CANDIDATE" "$COMANDO_APP_DIR/pull-releases/state"
