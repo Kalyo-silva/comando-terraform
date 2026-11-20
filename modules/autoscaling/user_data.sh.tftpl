@@ -164,6 +164,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=3600
 StateDirectory=comando-pull
 StateDirectoryMode=0700
 Environment=COMANDO_CI_RETRY_FILE=/var/lib/comando-pull/retry-until
