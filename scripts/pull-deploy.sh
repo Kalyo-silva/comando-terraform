@@ -8,6 +8,8 @@ efs=${COMANDO_EFS_MOUNT:-/mnt/comando-anexos}
 releases="$app/pull-releases"
 state="$releases/state"
 services=(backend web worker scheduler)
+readiness_dir=${COMANDO_READINESS_DIR:-/run/comando-readiness}
+readiness_file="$readiness_dir/ready"
 
 audit() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 fail() { audit "$*"; exit 1; }
@@ -58,6 +60,23 @@ if os.name == "posix":
     finally:
         os.close(fd)
 PY
+}
+
+# Initial authorization is issued only by comando-readiness-sync.
+# On ordinary deployments, the authorization marker allows publishing readiness
+# again after a healthy switch or rollback.
+readiness_off() {
+  if [[ -d $readiness_dir ]]; then
+    rm -f -- "$readiness_file" || fail 'result=readiness_disable_failed'
+  fi
+}
+readiness_on() {
+  local sha=$1 tmp
+  [[ -f $readiness_dir/authorized ]] || return 0
+  tmp=$(mktemp "$readiness_dir/.ready.XXXXXXXX") || fail 'result=readiness_create_failed'
+  printf '%s\n' "$sha" > "$tmp" || fail 'result=readiness_write_failed'
+  chmod 0644 "$tmp" || fail 'result=readiness_permissions_failed'
+  mv -f -- "$tmp" "$readiness_file" || fail 'result=readiness_publish_failed'
 }
 
 compose() {
@@ -211,6 +230,7 @@ rollback() {
   if ! switch_to "$active" || ! write_state healthy "$active"; then
     fail "result=rollback_failed target=$active candidate=$pending"
   fi
+  readiness_on "$active"
   audit "result=rolled_back target=$active candidate=$pending"
 }
 
@@ -229,6 +249,7 @@ if [[ -e $state ]]; then
       [[ $pending =~ ^[0-9a-f]{40}$ ]] || fail 'result=invalid_state'
       images_ready "$active" && config_ready "$active" && acquire_db_lock "$active" ||
         fail "result=recovery_blocked target=$active"
+      readiness_off
       rollback
       exit 0
       ;;
@@ -254,6 +275,7 @@ candidate=$(check_ci) || fail 'result=ci_unavailable_or_blocked'
 [[ $candidate == "$reviewed" ]] || fail 'result=reviewed_sha_mismatch'
 if [[ $candidate == "${active#bootstrap-}" ]]; then
   config_ready "$active" && healthy "$active" || fail "result=active_unhealthy sha=$candidate"
+  readiness_on "$active"
   audit "result=already_active sha=$candidate"
   exit 0
 fi
@@ -298,6 +320,7 @@ compose "$candidate" run -T --rm --no-deps --pull never backend php \
 
 [[ $(check_ci) == "$candidate" ]] || fail "result=revalidation_failed sha=$candidate"
 db_lock_held || fail 'result=postgres_lock_lost'
+readiness_off
 pending=$candidate
 write_state switching "$active" "$pending" || fail 'result=state_write_failed'
 audit "action=activate sha=$candidate previous=$active"
@@ -307,4 +330,5 @@ if ! switch_to "$candidate"; then
   exit 1
 fi
 write_state healthy "$candidate" || fail 'result=state_write_failed'
+readiness_on "$candidate"
 audit "result=deployed sha=$candidate previous=$active"
