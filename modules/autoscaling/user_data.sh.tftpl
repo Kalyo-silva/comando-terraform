@@ -181,7 +181,7 @@ cat > /etc/systemd/system/comando-pull.timer <<'UNIT'
 Description=Check Comando pull deploy eligibility periodically
 
 [Timer]
-OnBootSec=15min
+OnBootSec=2min
 OnUnitInactiveSec=15min
 RandomizedDelaySec=2min
 

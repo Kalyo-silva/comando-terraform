@@ -60,8 +60,12 @@ resource "aws_launch_template" "instances" {
 
   lifecycle {
     precondition {
-      condition     = !var.auto_deploy_enabled || (var.min_size == 1 && var.max_size == 1 && var.desired_capacity == 1)
-      error_message = "Auto deploy currently supports a single EC2 only: min_size, max_size and desired_capacity must all be 1."
+      condition = !var.auto_deploy_enabled || (
+        var.min_size >= 2 &&
+        var.desired_capacity >= var.min_size &&
+        var.max_size >= var.desired_capacity
+      )
+      error_message = "Auto deploy multi-EC2 requires min_size >= 2 and valid desired/max capacity."
     }
     precondition {
       condition     = !var.auto_deploy_enabled || var.pull_deploy_timer_enabled
