@@ -16,6 +16,18 @@ COMMIT='${application_commit_sha}'
 EFS_ID='${efs_file_system_id}'
 EFS_ACCESS_POINT='${efs_access_point_id}'
 
+# Keep traffic blocked until CI-verified bootstrap or update completes.
+cat > /etc/tmpfiles.d/comando-readiness.conf <<'TMPFILES'
+d /run/comando-readiness 0755 root root -
+TMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/comando-readiness.conf
+rm -f -- /run/comando-readiness/ready /run/comando-readiness/authorized
+install -d -m 0755 /etc/comando-readiness
+cat > /etc/comando-readiness/guard.conf <<'NGINX_GUARD'
+if (!-f /run/comando-readiness/ready) { return 503; }
+NGINX_GUARD
+chmod 0644 /etc/comando-readiness/guard.conf
+
 apt-get update
 apt-get install -y ca-certificates curl git gnupg jq awscli python3
 install -m 0755 -d /etc/apt/keyrings
@@ -101,6 +113,11 @@ ENV
 chmod 600 "$APP_DIR/.env"
 
 cat > "$APP_DIR/compose.aws.yaml" <<'YAML'
+services:
+  web:
+    volumes:
+      - /run/comando-readiness:/run/comando-readiness:ro
+      - /etc/comando-readiness/guard.conf:/etc/nginx/comando-readiness/guard.conf:ro
 volumes:
   anexos:
     driver: local
@@ -161,6 +178,10 @@ cat > /etc/systemd/system/comando-pull.service <<'UNIT'
 Description=Check Comando pull deploy eligibility
 Wants=network-online.target
 After=network-online.target
+%{ if auto_deploy_enabled ~}
+Requires=comando-readiness.service
+After=comando-readiness.service
+%{ endif ~}
 
 [Service]
 Type=oneshot
@@ -189,8 +210,103 @@ RandomizedDelaySec=2min
 WantedBy=timers.target
 UNIT
 
+# Boot/reboot readiness gate. Never authorize the pinned image without approved CI SHA.
+cat > /usr/local/sbin/comando-readiness-sync <<'READINESS_SYNC'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+app=/opt/comando
+ready_dir=/run/comando-readiness
+state="$app/pull-releases/state"
+install -d -m 0755 "$ready_dir"
+rm -f -- "$ready_dir/ready" "$ready_dir/authorized"
+
+expected=$(/usr/local/sbin/comando-pull --dry-run)
+[[ $expected =~ ^[0-9a-f]{40}$ ]] || exit 1
+
+# Do not let the initial auto-pull quarantine a valid SHA during container startup.
+if [[ ! -f $state ]]; then
+  bootstrap_ok=0
+  for attempt in $(seq 1 120); do
+    services_ok=1
+    for service in backend web worker scheduler; do
+      id=$(docker compose --project-name comando --project-directory "$app" --env-file "$app/.env" \
+        -f "$app/compose.yaml" -f "$app/compose.aws.yaml" ps -q "$service" 2>/dev/null) || id=
+      status=
+      if [[ -n $id ]]; then
+        status=$(docker inspect --format '{{.State.Health.Status}}' "$id" 2>/dev/null) || status=
+      fi
+      if [[ $status != healthy ]]; then services_ok=0; break; fi
+    done
+    if [[ $services_ok == 1 ]] &&
+      curl -q --silent --fail --connect-timeout 3 --max-time 8 http://127.0.0.1:8080/health |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(d.get("status") != "ok" or d.get("banco") != "ok")'; then
+      bootstrap_ok=1
+      break
+    fi
+    sleep 5
+  done
+  [[ $bootstrap_ok == 1 ]] || exit 1
+fi
+
+# This process cannot set the marker until it owns the local activation lock.
+/usr/local/sbin/comando-auto-pull
+
+# Revalidar o SHA aprovado e as imagens Docker efetivamente ativas.
+# O pull-deploy ja verifica os IDs das imagens e a saude dos servicos.
+/usr/local/sbin/comando-pull --apply "$expected"
+
+mkdir -p "$app/pull-releases"
+exec 9>"$app/pull-releases/lock"
+flock -w 180 9
+[[ -f $state ]] || exit 1
+phase= active= pending= extra=
+IFS=' ' read -r phase active pending extra < "$state"
+[[ $phase == healthy && -z $pending && -z $extra ]] || exit 1
+[[ $active == "$expected" || $active == "bootstrap-$expected" ]] || exit 1
+
+confirmed=$(/usr/local/sbin/comando-pull --dry-run)
+[[ $confirmed == "$expected" ]] || exit 1
+curl -q --silent --fail --connect-timeout 3 --max-time 8 http://127.0.0.1:8080/health |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(d.get("status") != "ok" or d.get("banco") != "ok")'
+
+# Two markers: deploys can republish 'ready' only after first authorization.
+for name in authorized ready; do
+  tmp=$(mktemp "$ready_dir/.$name.XXXXXXXX")
+  printf '%s\n' "$expected" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f -- "$tmp" "$ready_dir/$name"
+done
+READINESS_SYNC
+chmod 0755 /usr/local/sbin/comando-readiness-sync
+
+cat > /etc/systemd/system/comando-readiness.service <<'UNIT'
+[Unit]
+Description=Authorize COMANDO readiness after approved CI and health check
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=3600
+Restart=on-failure
+RestartSec=60
+StateDirectory=comando-pull
+StateDirectoryMode=0700
+Environment=COMANDO_CI_RETRY_FILE=/var/lib/comando-pull/retry-until
+ExecStart=/usr/local/sbin/comando-readiness-sync
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 0644 /etc/systemd/system/comando-readiness.service
+
 chmod 0644 /etc/systemd/system/comando-pull.{service,timer}
 systemctl daemon-reload
 %{ if pull_deploy_timer_enabled || auto_deploy_enabled ~}
 systemctl enable --now comando-pull.timer
+%{ endif ~}
+%{ if auto_deploy_enabled ~}
+systemctl enable comando-readiness.service
+systemctl start --no-block comando-readiness.service
 %{ endif ~}
