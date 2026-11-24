@@ -68,7 +68,7 @@ resource "random_id" "app_key" {
 }
 
 resource "aws_secretsmanager_secret" "app_key" {
-  name        = "${var.project_name}/comando/app-key"
+  name_prefix = "${var.project_name}/comando/app-key-"
   description = "Shared Laravel APP_KEY for all Comando EC2 instances."
 }
 
@@ -86,7 +86,7 @@ resource "random_password" "initial_admin" {
 }
 
 resource "aws_secretsmanager_secret" "initial_admin" {
-  name        = "${var.project_name}/comando/initial-admin"
+  name_prefix = "${var.project_name}/comando/initial-admin-"
   description = "Generated initial Comando administrator password."
 }
 
